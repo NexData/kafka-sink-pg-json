@@ -4,7 +4,7 @@
 
   <groupId>com.justone</groupId>
   <artifactId>justone-kafka-sink-pg-json</artifactId>
-  <version>1.0.1-nex</version>
+  <version>1.0.2.NEXDATA</version>
   <packaging>jar</packaging>
 
   <name>kafka-sink-pg-json</name>
@@ -46,7 +46,7 @@
     <dependency>
       <groupId>com.justone</groupId>
       <artifactId>justone-pgwriter</artifactId>
-      <version>1.0.1-nex</version>
+      <version>1.0.2.NEXDATA</version>
     </dependency>
   </dependencies>
 </project>

@@ -48,7 +48,7 @@ public class PostgreSQLSinkConnector extends SinkConnector {
   /**
    * Version of the connector
    */
-  public final static String VERSION="1.0a";
+  public final static String VERSION="1.0.2.NEXDATA";
 
   private static final ConfigDef CONFIG_DEF = new ConfigDef()
           .define("tasks.max", Type.INT, Importance.HIGH, "Number of tasks to be assigned to the connector. Mandatory. Must be 1 or more.")

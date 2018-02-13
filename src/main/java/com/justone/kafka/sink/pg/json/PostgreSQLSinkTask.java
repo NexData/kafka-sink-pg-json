@@ -40,10 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.sql.*;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
 
 /**
@@ -167,6 +164,13 @@ public class PostgreSQLSinkTask extends SinkTask {
      */
     private String table;
 
+    private String host;
+    private String database;
+    private String username;
+    private String password;
+    private String[] columns;
+    private int bufferSize;
+
     /**
      * Constructor for sink task
      */
@@ -225,14 +229,14 @@ public class PostgreSQLSinkTask extends SinkTask {
         try {
 
       /* get configuration properties */
-            String host = props.get(HOST_CONFIG);//database host
-            String database = props.get(DATABASE_CONFIG);//database name
-            String username = props.get(USER_CONFIG);//database username
-            String password = props.get(PASSWORD_CONFIG);//database password
+            host = props.get(HOST_CONFIG);//database host
+            database = props.get(DATABASE_CONFIG);//database name
+            username = props.get(USER_CONFIG);//database username
+            password = props.get(PASSWORD_CONFIG);//database password
             schema = props.get(SCHEMA_CONFIG);//schema of table to sink to
             table = props.get(TABLE_CONFIG);//name of table to sink to
             String columnList = props.get(COLUMN_CONFIG);//columns to sink to
-            Integer bufferSize = Integer.parseInt(props.get(BUFFER_CONFIG));//task buffer size
+            bufferSize = Integer.parseInt(props.get(BUFFER_CONFIG));//task buffer size
             String pathList = props.get(PARSE_CONFIG);//list if JSON parse paths
             String delivery = props.get(DELIVERY_CONFIG);//delivery semantics required
 
@@ -246,7 +250,7 @@ public class PostgreSQLSinkTask extends SinkTask {
                 throw new ConnectException("Buffer size configuration is invalid");//buffer size is mandatory
       
       /* construct parse paths from path list */
-            String[] columns = columnList.split("\\,");//split column list into separate strings
+            columns = columnList.split("\\,");//split column list into separate strings
             String[] paths = pathList.split("\\,");//split path list into separate strings
             iPaths = new Path[paths.length];//construct array of paths
             for (int i = 0; i < paths.length; ++i) {//for each path
@@ -262,18 +266,48 @@ public class PostgreSQLSinkTask extends SinkTask {
                 }//for each delivery option
             }//if delivery option specified
 
-            iWriter = new TableWriter(host, database, username, password, table, columns, bufferSize);//construct table writer
-
-            iConnection = iWriter.getConnection();
             iParser = new Parser();//construct parser
 
-        } catch (NumberFormatException | IOException exception) {
+        } catch (NumberFormatException exception) {
             throw new ConnectException(exception);//ho hum...
         }//try{}
 
     }//start()
 
+    private void initWriter() throws ConnectException {
+        try {
+            // close any previous connection
+            if (iConnection != null && !iConnection.isClosed()) {
+                iConnection.close();
+            }
+
+            iWriter = new TableWriter(host, database, username, password, table, columns, bufferSize);//construct table writer
+            iConnection = iWriter.getConnection();
+        } catch (SQLException | IOException exception) {
+            throw new ConnectException(exception);
+        }//try{}
+    }
+
+    @Override
+    public void close(Collection<TopicPartition> partitions) {
+        super.close(partitions);
+
+        fLog.trace("Closing");
+
+        try {
+
+            iWriter.close();//close table writer
+
+        } catch (IOException exception) {
+            throw new ConnectException(exception);
+        }//try{}
+    }
+
     public void open(Collection<TopicPartition> partitions) throws ConnectException {
+        fLog.trace("Opening");
+
+        initWriter();
+
         try {
             Statement statement = iConnection.createStatement();
 
@@ -281,6 +315,8 @@ public class PostgreSQLSinkTask extends SinkTask {
                   /* start sink session */
                 String start = SYNC_START.replace("<S>", schema).replace("<T>", table);//prepare start statement
                 statement.executeQuery(start);//perform start
+
+                Set<TopicPartition> topicPartitions = new HashSet<>(partitions);
         
         /* fetch table state */
                 String state = SYNC_STATE.replace("<S>", schema).replace("<T>", table);//prepare state query statement
@@ -292,8 +328,11 @@ public class PostgreSQLSinkTask extends SinkTask {
                         String topic = resultSet.getString(1);//get topic
                         Integer partition = resultSet.getInt(2);//get partition number
                         Long offset = resultSet.getLong(3);//get offset number
-                        offsetMap.put(new TopicPartition(topic, partition), offset);//append to map of offsets
-                        fLog.info("resuming topic-parition {}-{} at offset {}", topic, partition, offset);
+                        TopicPartition topicPartition = new TopicPartition(topic, partition);
+                        if (topicPartitions.contains(topicPartition)) {
+                            offsetMap.put(topicPartition, offset);//append to map of offsets
+                            fLog.info("resuming topic-parition {}-{} at offset {}", topic, partition, offset);
+                        }
                     }//for each partition
                     resultSet.close();//be a good citizen
 
@@ -312,7 +351,7 @@ public class PostgreSQLSinkTask extends SinkTask {
                 statement.executeQuery(drop);//perform drop
 
             }//if synchronized delivery
-        } catch (SQLException exception) {
+        } catch (Exception exception) {
             throw new ConnectException(exception);
         }//try{}
 
@@ -329,7 +368,7 @@ public class PostgreSQLSinkTask extends SinkTask {
 
         for (SinkRecord record : sinkRecords) {//for each sink record
 
-            fLog.trace("Put message {}", record.value());
+            //fLog.trace("Put message {}", record.value());
 
             try {
 
@@ -440,7 +479,9 @@ public class PostgreSQLSinkTask extends SinkTask {
 
         try {
 
-            iWriter.close();//close table writer
+            if (iWriter != null) {
+                iWriter.close();//close table writer
+            }
 
         } catch (IOException exception) {
             throw new ConnectException(exception);
