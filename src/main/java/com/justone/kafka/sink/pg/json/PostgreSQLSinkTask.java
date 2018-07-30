@@ -30,8 +30,10 @@ import com.justone.json.Parser;
 import com.justone.json.Path;
 import com.justone.pgwriter.TableWriter;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.apache.kafka.connect.sink.SinkTaskContext;
@@ -211,7 +213,7 @@ public class PostgreSQLSinkTask extends SinkTask {
     public void start(Map<String, String> props) throws ConnectException {
 
         fLog.trace("Starting");
-    
+
     /* log connector configuration */
         String configuration = "\n";
         configuration = configuration + '\t' + HOST_CONFIG + ':' + props.get(HOST_CONFIG) + '\n';
@@ -248,7 +250,7 @@ public class PostgreSQLSinkTask extends SinkTask {
             if (pathList == null) throw new ConnectException("Parse paths not configured");//path list is mandatory
             if (bufferSize < 0)
                 throw new ConnectException("Buffer size configuration is invalid");//buffer size is mandatory
-      
+
       /* construct parse paths from path list */
             columns = columnList.split("\\,");//split column list into separate strings
             String[] paths = pathList.split("\\,");//split path list into separate strings
@@ -283,8 +285,17 @@ public class PostgreSQLSinkTask extends SinkTask {
 
             iWriter = new TableWriter(host, database, username, password, table, columns, bufferSize);//construct table writer
             iConnection = iWriter.getConnection();
+
+            /* start sink session */
+            String start = SYNC_START.replace("<S>", schema).replace("<T>", table);//prepare start statement
+            iConnection.createStatement().executeQuery(start);//perform start
+
+            /* prepare flush statement */
+            String flush = SYNC_FLUSH.replace("<S>", schema).replace("<T>", table);//prepare flush statement
+            iFlushStatement = iConnection.prepareStatement(flush);//set flush statement
+
         } catch (SQLException | IOException exception) {
-            throw new ConnectException(exception);
+            throw new RetriableException(exception);
         }//try{}
     }
 
@@ -309,15 +320,12 @@ public class PostgreSQLSinkTask extends SinkTask {
         initWriter();
 
         try {
+
             Statement statement = iConnection.createStatement();
 
             if (iDelivery == SYNCHRONIZED) {//if synchronized delivery
-                  /* start sink session */
-                String start = SYNC_START.replace("<S>", schema).replace("<T>", table);//prepare start statement
-                statement.executeQuery(start);//perform start
-
                 Set<TopicPartition> topicPartitions = new HashSet<>(partitions);
-        
+
         /* fetch table state */
                 String state = SYNC_STATE.replace("<S>", schema).replace("<T>", table);//prepare state query statement
                 ResultSet resultSet = statement.executeQuery(state);//perform state query
@@ -339,20 +347,15 @@ public class PostgreSQLSinkTask extends SinkTask {
                     iTaskContext.offset(offsetMap);//synchronise offsets
 
                 }//if state is not empty
-        
-        /* prepare flush statement */
-                String flush = SYNC_FLUSH.replace("<S>", schema).replace("<T>", table);//prepare flush statement
-                iFlushStatement = iConnection.prepareStatement(flush);//set flush statement
-
             } else {//else non synchronised delivery
-        
+
         /* drop synchronization state */
                 String drop = SYNC_DROP.replace("<S>", schema).replace("<T>", table);//prepare drop statement
                 statement.executeQuery(drop);//perform drop
 
             }//if synchronized delivery
         } catch (Exception exception) {
-            throw new ConnectException(exception);
+            throw new RetriableException(exception);
         }//try{}
 
     }//open()
@@ -364,7 +367,7 @@ public class PostgreSQLSinkTask extends SinkTask {
      * @throws ConnectException if put fails
      */
     @Override
-    public void put(Collection<SinkRecord> sinkRecords) throws ConnectException {
+    public void put(Collection<SinkRecord> sinkRecords) throws KafkaException {
 
         for (SinkRecord record : sinkRecords) {//for each sink record
 
@@ -373,7 +376,7 @@ public class PostgreSQLSinkTask extends SinkTask {
             try {
 
                 iParser.parse(record.value().toString());//parse record value
-        
+
         /* append parsed JSON elements to the table */
                 for (int i = 0; i < iPaths.length; ++i) {//for each parse path
 
@@ -402,8 +405,9 @@ public class PostgreSQLSinkTask extends SinkTask {
 
                 }//for each element
 
-            } catch (IOException exception) {
-                throw new ConnectException(exception);
+            } catch (Exception exception) {
+                initWriter(); // attempt reconnect
+                throw new RetriableException(exception);
             }//try{}
 
         }//for each sink record
@@ -427,7 +431,7 @@ public class PostgreSQLSinkTask extends SinkTask {
                 iWriter.flush();//flush table writes
 
             if (iDelivery == SYNCHRONIZED) {//if synchronized delivery
-          
+
           /* create topic, partition and offset arrays for database flush function call */
 
                 int size = offsets.size();//get number of flush map entries
@@ -452,7 +456,7 @@ public class PostgreSQLSinkTask extends SinkTask {
                 iFlushStatement.setArray(1, iConnection.createArrayOf("varchar", topicArray));//bind topic array
                 iFlushStatement.setArray(2, iConnection.createArrayOf("integer", partitionArray));//bind partition array
                 iFlushStatement.setArray(3, iConnection.createArrayOf("bigint", offsetArray));//bind offset array
-          
+
           /* execute the database flush function */
 
                 iFlushStatement.executeQuery();
@@ -460,7 +464,8 @@ public class PostgreSQLSinkTask extends SinkTask {
             }//if synchronized delivery
 
         } catch (SQLException | IOException exception) {
-            throw new ConnectException(exception);
+            initWriter(); // attempt reconnect
+            throw new RetriableException(exception);
         }//try{}
 
         fLog.trace("Flush stop at " + System.currentTimeMillis());
